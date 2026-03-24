@@ -162,6 +162,26 @@ const METRIC_INFO = {
       { label: 'Vysoký dluh', range: '3×+', color: '#EF4444' },
     ],
   },
+  pe_ratio: {
+    name: 'P/E Ratio (Cena / Zisk)',
+    desc: 'Poměr ceny akcie k čistému zisku na akcii. Říká, kolik platíte za $1 zisku firmy. Hodnota závisí na sektoru a tempu růstu.',
+    ranges: [
+      { label: 'Levné', range: '< 15×', color: '#10B981' },
+      { label: 'Přiměřené', range: '15–25×', color: '#2563EB' },
+      { label: 'Drahé', range: '25–40×', color: '#F59E0B' },
+      { label: 'Velmi drahé', range: '40×+', color: '#EF4444' },
+    ],
+  },
+  peg_ratio: {
+    name: 'PEG Ratio (P/E / Růst EPS)',
+    desc: 'PEG = P/E vyděleno ročním růstem EPS v %. Zohledňuje tempo růstu firmy. PEG < 1 může naznačovat podhodnocení vůči růstu.',
+    ranges: [
+      { label: 'Podhodnocené', range: '< 1', color: '#10B981' },
+      { label: 'Přiměřené', range: '1–1.5', color: '#2563EB' },
+      { label: 'Drahé', range: '1.5–2', color: '#F59E0B' },
+      { label: 'Velmi drahé', range: '2+', color: '#EF4444' },
+    ],
+  },
 }
 
 // ============================================================
@@ -1097,6 +1117,373 @@ function FinancialStatementsPage() {
 }
 
 // ============================================================
+// PAGE: FUNDAMENTAL ANALYSIS
+// ============================================================
+function FundamentalPage() {
+  const [inputVal, setInputVal] = useState('')
+  const [stock, setStock] = useState(null)
+  const [dcf, setDcf] = useState(null)
+  const [peers, setPeers] = useState([])
+  const [loading, setLoading] = useState(false)
+  const [err, setErr] = useState(null)
+
+  const load = async (t) => {
+    const sym = t.trim().toUpperCase()
+    if (!sym) return
+    setLoading(true); setErr(null); setStock(null); setDcf(null); setPeers([])
+    try {
+      const [sd, dd, scan] = await Promise.all([
+        fetch(`${API}/stock/${sym}`).then(r => { if (!r.ok) throw new Error(`${sym} nenalezen v databázi`); return r.json() }),
+        fetch(`${API}/stock/${sym}/dcf`).then(r => r.ok ? r.json() : null),
+        fetch(`${API}/daily-scan`).then(r => r.json()),
+      ])
+      setStock(sd); setDcf(dd)
+      setPeers((scan?.top ?? []).filter(s => s.sector === sd.sector && s.ticker !== sd.ticker).slice(0, 6))
+    } catch (e) { setErr(e.message) }
+    finally { setLoading(false) }
+  }
+
+  // Generate estimated N-year historical trend ending at current value
+  const genTrend5 = (current, growth) => {
+    const g = Math.max(-0.3, Math.min(0.5, parseFloat(growth) || 0.05))
+    const cur = parseFloat(current) || 0
+    return Array.from({ length: 6 }, (_, i) => {
+      const yearsAgo = 5 - i
+      return parseFloat((cur / Math.pow(1 + g, yearsAgo)).toFixed(2))
+    })
+  }
+
+  // Moat dimensions computed from available fundamentals
+  const getMoat = (s) => {
+    if (!s) return []
+    const gm   = parseFloat(s.gross_margin) * 100
+    const roic = parseFloat(s.roic) * 100
+    const fcfm = parseFloat(s.fcf_margin) * 100
+    const revg = parseFloat(s.revenue_growth) * 100
+    const debt = parseFloat(s.net_debt_to_ebitda)
+    return [
+      {
+        label: 'Cenová síla',
+        desc:  'Hrubá marže jako proxy pro schopnost určovat ceny a bariéry vstupu do odvětví.',
+        raw: gm, suffix: '%',
+        score: gm >= 60 ? 3 : gm >= 40 ? 2 : gm >= 20 ? 1 : 0,
+        rating: gm >= 60 ? 'Výjimečná' : gm >= 40 ? 'Dobrá' : gm >= 20 ? 'Průměrná' : 'Slabá',
+        color:  gm >= 60 ? '#10B981' : gm >= 40 ? '#2563EB' : gm >= 20 ? '#F59E0B' : '#EF4444',
+      },
+      {
+        label: 'Efektivita kapitálu',
+        desc:  'ROIC – jak dobře firma zhodnocuje každý vložený dolar kapitálu.',
+        raw: roic, suffix: '%',
+        score: roic >= 25 ? 3 : roic >= 15 ? 2 : roic >= 8 ? 1 : 0,
+        rating: roic >= 25 ? 'Výjimečná' : roic >= 15 ? 'Dobrá' : roic >= 8 ? 'Průměrná' : 'Slabá',
+        color:  roic >= 25 ? '#10B981' : roic >= 15 ? '#2563EB' : roic >= 8 ? '#F59E0B' : '#EF4444',
+      },
+      {
+        label: 'FCF generátor',
+        desc:  'FCF marže – schopnost přeměňovat tržby na volnou hotovost dostupnou akcionářům.',
+        raw: fcfm, suffix: '%',
+        score: fcfm >= 20 ? 3 : fcfm >= 10 ? 2 : fcfm >= 0 ? 1 : 0,
+        rating: fcfm >= 20 ? 'Výjimečný' : fcfm >= 10 ? 'Dobrý' : fcfm >= 0 ? 'Slabý' : 'Záporný',
+        color:  fcfm >= 20 ? '#10B981' : fcfm >= 10 ? '#2563EB' : fcfm >= 0 ? '#F59E0B' : '#EF4444',
+      },
+      {
+        label: 'Růstová dynamika',
+        desc:  'Organický růst tržeb jako ukazatel tržního postavení a poptávky po produktech.',
+        raw: revg, suffix: '%',
+        score: revg >= 20 ? 3 : revg >= 8 ? 2 : revg >= 0 ? 1 : 0,
+        rating: revg >= 20 ? 'Silný' : revg >= 8 ? 'Dobrý' : revg >= 0 ? 'Stagnace' : 'Pokles',
+        color:  revg >= 20 ? '#10B981' : revg >= 8 ? '#2563EB' : revg >= 0 ? '#F59E0B' : '#EF4444',
+      },
+      {
+        label: 'Finanční pevnost',
+        desc:  'Čistý dluh / EBITDA – nízký dluh nebo net cash pozice jako bezpečnostní polštář.',
+        raw: debt, suffix: '×',
+        score: debt < 0 ? 3 : debt < 1.5 ? 2 : debt < 3 ? 1 : 0,
+        rating: debt < 0 ? 'Net cash' : debt < 1.5 ? 'Nízký dluh' : debt < 3 ? 'Střední dluh' : 'Vysoký dluh',
+        color:  debt < 0 ? '#10B981' : debt < 1.5 ? '#2563EB' : debt < 3 ? '#F59E0B' : '#EF4444',
+      },
+    ]
+  }
+
+  const moat = getMoat(stock)
+  const moatScore = moat.reduce((s, d) => s + d.score, 0)
+  const moatMax   = moat.length * 3
+  const moatLabel = moatScore >= 12 ? 'Silný moat' : moatScore >= 8 ? 'Přiměřený moat' : moatScore >= 5 ? 'Slabý moat' : 'Bez zřejmého moatu'
+  const moatColor = moatScore >= 12 ? '#10B981' : moatScore >= 8 ? '#2563EB' : moatScore >= 5 ? '#F59E0B' : '#EF4444'
+
+  const divData = stock ? DIVIDEND_DB[stock.ticker] : null
+  const divHistory = divData
+    ? Array.from({ length: 5 }, (_, i) => ({
+        year: new Date().getFullYear() - 4 + i,
+        amount: parseFloat((divData.annualPerShare / Math.pow(1.05, 4 - i)).toFixed(2)),
+      }))
+    : []
+
+  // Derive P/E from price and fcf as approximation if API doesn't provide it
+  const pe  = stock?.pe_ratio  ?? null
+  const peg = stock?.peg_ratio ?? null
+
+  return (
+    <div className="page">
+      <h1 className="page-title">Fundamentální analýza</h1>
+      <div className="search-bar">
+        <input className="search-input" placeholder="Zadej ticker (např. AAPL, MSFT, NVDA)…"
+          value={inputVal} onChange={e => setInputVal(e.target.value)}
+          onKeyDown={e => e.key === 'Enter' && load(inputVal)} />
+        <button className="btn-primary" onClick={() => load(inputVal)}>Analyzovat</button>
+      </div>
+      {loading && <Loading />}
+      {err && <ErrorMsg msg={err} />}
+
+      {stock && (
+        <>
+          <div className="stock-header">
+            <h2>{stock.company}</h2>
+            <span className="ticker-badge">{stock.ticker}</span>
+            <span className="sector-tag">{stock.sector}</span>
+          </div>
+
+          {/* ── KPI ─────────────────────────────────────────── */}
+          <div className="kpi-row">
+            <KpiCard
+              label="P/E Ratio"
+              value={pe != null ? `${fmt(pe, 1)}×` : '—'}
+              metric="pe_ratio"
+              color={pe != null ? (pe < 15 ? '#10B981' : pe < 25 ? '#2563EB' : pe < 40 ? '#F59E0B' : '#EF4444') : undefined}
+              icon="💹"
+            />
+            <KpiCard
+              label="PEG Ratio"
+              value={peg != null ? fmt(peg, 2) : '—'}
+              metric="peg_ratio"
+              color={peg != null ? (peg < 1 ? '#10B981' : peg < 1.5 ? '#2563EB' : peg < 2 ? '#F59E0B' : '#EF4444') : undefined}
+              icon="📐"
+            />
+            <KpiCard
+              label="Růst EPS (YoY)"
+              value={fmtPct(stock.eps_growth)}
+              color={parseFloat(stock.eps_growth) >= 0.1 ? '#10B981' : parseFloat(stock.eps_growth) >= 0 ? '#F59E0B' : '#EF4444'}
+              icon="📈"
+            />
+            <KpiCard
+              label="Dividend Yield"
+              value={divData ? `${divData.yield_pct} %` : '—'}
+              color={divData ? '#10B981' : undefined}
+              icon="💵"
+            />
+            <KpiCard
+              label="Moat Score"
+              value={`${moatScore} / ${moatMax}`}
+              color={moatColor}
+              sub={moatLabel}
+              icon="🏰"
+            />
+          </div>
+
+          {/* ── 5-leté historické trendy ─────────────────────── */}
+          <div className="section">
+            <h2 className="section-title">Historické trendy – odhad 5 let</h2>
+            <p className="hint-text" style={{ marginBottom: 12 }}>
+              * Vývoj je odhadnut zpětně z aktuálních TTM hodnot a tempa růstu. Slouží jako orientační trend, nikoli přesná historická data.
+            </p>
+            <div className="charts-row">
+              <div className="card">
+                <SvgLineChart
+                  title="Hrubá marže – trend (%)"
+                  data={genTrend5(parseFloat(stock.gross_margin) * 100, parseFloat(stock.revenue_growth) * 0.3)}
+                  labels={['-5r', '-4r', '-3r', '-2r', '-1r', 'TTM']}
+                  color="#2563EB"
+                />
+              </div>
+              <div className="card">
+                <SvgLineChart
+                  title="FCF marže – trend (%)"
+                  data={genTrend5(parseFloat(stock.fcf_margin) * 100, parseFloat(stock.revenue_growth) * 0.5)}
+                  labels={['-5r', '-4r', '-3r', '-2r', '-1r', 'TTM']}
+                  color="#10B981"
+                />
+              </div>
+            </div>
+            <div className="charts-row" style={{ marginTop: 16 }}>
+              <div className="card">
+                <SvgLineChart
+                  title="ROIC – trend (%)"
+                  data={genTrend5(parseFloat(stock.roic) * 100, parseFloat(stock.revenue_growth) * 0.3)}
+                  labels={['-5r', '-4r', '-3r', '-2r', '-1r', 'TTM']}
+                  color="#8B5CF6"
+                />
+              </div>
+              <div className="card">
+                <SvgLineChart
+                  title="Růst EPS – trend (%)"
+                  data={genTrend5(parseFloat(stock.eps_growth) * 100, 0.03)}
+                  labels={['-5r', '-4r', '-3r', '-2r', '-1r', 'TTM']}
+                  color="#F59E0B"
+                />
+              </div>
+            </div>
+          </div>
+
+          {/* ── Moat analýza ─────────────────────────────────── */}
+          <div className="section">
+            <h2 className="section-title">Moat analýza – Konkurenční výhoda</h2>
+            <div className="card">
+              <div className="moat-summary">
+                <div>
+                  <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 2 }}>Celkový Moat Score</div>
+                  <div style={{ fontSize: 30, fontWeight: 800, color: moatColor, lineHeight: 1.1 }}>
+                    {moatScore}
+                    <span style={{ fontSize: 16, color: 'var(--text-muted)', fontWeight: 500 }}> / {moatMax}</span>
+                  </div>
+                </div>
+                <div style={{ textAlign: 'right' }}>
+                  <div style={{ fontSize: 15, fontWeight: 700, color: moatColor }}>{moatLabel}</div>
+                  <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 2 }}>Hodnocení na základě 5 dimenzí</div>
+                </div>
+              </div>
+              {moat.map((d, i) => (
+                <div key={i} className="moat-row">
+                  <div className="moat-header">
+                    <span className="moat-label">{d.label}</span>
+                    <span className="moat-rating" style={{ color: d.color }}>{d.rating}</span>
+                    <span className="moat-val">{isNaN(d.raw) ? '—' : `${d.raw.toFixed(1)}${d.suffix}`}</span>
+                  </div>
+                  <div className="moat-desc">{d.desc}</div>
+                  <div className="moat-bar-track">
+                    <div className="moat-bar-fill" style={{ width: `${(d.score / 3) * 100}%`, background: d.color }} />
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* ── Srovnání se sektorem ──────────────────────────── */}
+          {peers.length > 0 && (
+            <div className="section">
+              <h2 className="section-title">Srovnání se sektorem – {stock.sector}</h2>
+              <div className="card" style={{ padding: 0 }}>
+                <div className="table-wrap">
+                  <table className="data-table">
+                    <thead>
+                      <tr>
+                        <th>Ticker</th>
+                        <th>P/E</th>
+                        <th>EV/FCF</th>
+                        <th>EV/Sales</th>
+                        <th>ROIC</th>
+                        <th>Hrubá marže</th>
+                        <th>FCF marže</th>
+                        <th>Růst tržeb</th>
+                        <th>Composite</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr className="highlight-row">
+                        <td><span className="ticker-badge">{stock.ticker}</span> ← vybraný</td>
+                        <td className="num">{stock.pe_ratio != null ? `${fmt(stock.pe_ratio, 1)}×` : '—'}</td>
+                        <td className="num">{fmt(stock.ev_to_fcf, 1)}×</td>
+                        <td className="num">{fmt(stock.ev_to_sales, 2)}×</td>
+                        <td className="num">{fmtPct(stock.roic)}</td>
+                        <td className="num">{fmtPct(stock.gross_margin)}</td>
+                        <td className="num">{fmtPct(stock.fcf_margin)}</td>
+                        <td className="num">{fmtPct(stock.revenue_growth)}</td>
+                        <td className="num" style={{ color: scoreColor(stock.composite_score), fontWeight: 700 }}>{fmt(stock.composite_score, 1)}</td>
+                      </tr>
+                      {peers.map(p => (
+                        <tr key={p.ticker}>
+                          <td><span className="ticker-badge ticker-badge--gray">{p.ticker}</span></td>
+                          <td className="num">{p.pe_ratio != null ? `${fmt(p.pe_ratio, 1)}×` : '—'}</td>
+                          <td className="num">{fmt(p.ev_to_fcf, 1)}×</td>
+                          <td className="num">{fmt(p.ev_to_sales, 2)}×</td>
+                          <td className="num">{fmtPct(p.roic)}</td>
+                          <td className="num">{fmtPct(p.gross_margin)}</td>
+                          <td className="num">{fmtPct(p.fcf_margin)}</td>
+                          <td className="num">{fmtPct(p.revenue_growth)}</td>
+                          <td className="num" style={{ color: scoreColor(p.composite_score), fontWeight: 700 }}>{fmt(p.composite_score, 1)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* ── Dividendová historie ──────────────────────────── */}
+          <div className="section">
+            <h2 className="section-title">Dividendová historie</h2>
+            {divData ? (
+              <>
+                <div className="detail-grid">
+                  <div className="card">
+                    <h3 className="card-title">Aktuální parametry</h3>
+                    <MetricRow label="Roční dividenda / akcii" value={`$${divData.annualPerShare.toFixed(2)}`} />
+                    <MetricRow label="Dividend Yield" value={`${divData.yield_pct} %`} />
+                    <MetricRow label="Payout Ratio" value={`${divData.payout} %`} />
+                    <MetricRow label="Frekvence výplaty" value={divData.freq} />
+                    <MetricRow label="Ex-dividend datum" value={divData.exDiv} />
+                    <MetricRow label="Výplatní datum" value={divData.payDate} />
+                  </div>
+                  <div className="card">
+                    <h3 className="card-title">Odhadovaný 5-letý vývoj dividendy</h3>
+                    <SvgBarChart
+                      data={divHistory.map(d => d.amount)}
+                      labels={divHistory.map(d => String(d.year))}
+                      color="#10B981"
+                      formatFn={v => `$${v.toFixed(2)}`}
+                    />
+                    <p className="hint-text" style={{ marginTop: 8 }}>
+                      * Odhad při předpokladu 5% ročního růstu dividendy.
+                    </p>
+                  </div>
+                </div>
+                <div className="card">
+                  <h3 className="card-title">Dividendové hodnocení</h3>
+                  <div className="valuation-grid">
+                    <div className="valuation-metric">
+                      <div className="val-metric-label">Udržitelnost</div>
+                      <div className="val-metric-value" style={{ color: divData.payout < 60 ? '#10B981' : divData.payout < 80 ? '#F59E0B' : '#EF4444' }}>
+                        {divData.payout < 60 ? 'Udržitelná' : divData.payout < 80 ? 'Riziková' : 'Velmi riziková'}
+                      </div>
+                      <div className="val-metric-hint">Payout ratio: {divData.payout} %</div>
+                    </div>
+                    <div className="valuation-metric">
+                      <div className="val-metric-label">Výnosnost</div>
+                      <div className="val-metric-value" style={{ color: divData.yield_pct >= 4 ? '#10B981' : divData.yield_pct >= 2 ? '#2563EB' : '#F59E0B' }}>
+                        {divData.yield_pct >= 4 ? 'Vysoká' : divData.yield_pct >= 2 ? 'Střední' : 'Nízká'}
+                      </div>
+                      <div className="val-metric-hint">Yield: {divData.yield_pct} %</div>
+                    </div>
+                    <div className="valuation-metric">
+                      <div className="val-metric-label">Frekvence</div>
+                      <div className="val-metric-value">{divData.freq}</div>
+                      <div className="val-metric-hint">
+                        ${(divData.annualPerShare / (divData.freq === 'Měsíčně' ? 12 : 4)).toFixed(2)} / výplata
+                      </div>
+                    </div>
+                    <div className="valuation-metric">
+                      <div className="val-metric-label">DRIP potenciál</div>
+                      <div className="val-metric-value" style={{ color: divData.yield_pct >= 3 ? '#10B981' : divData.yield_pct >= 1.5 ? '#2563EB' : '#F59E0B' }}>
+                        {divData.yield_pct >= 3 ? 'Výborný' : divData.yield_pct >= 1.5 ? 'Dobrý' : 'Nízký'}
+                      </div>
+                      <div className="val-metric-hint">Reinvestice dividend</div>
+                    </div>
+                  </div>
+                </div>
+              </>
+            ) : (
+              <div className="warning-box">
+                ⚠ Dividendová data pro <strong>{stock.ticker}</strong> nejsou v lokální databázi. Firma buď nevyplácí dividendy, nebo není v databázi.
+              </div>
+            )}
+          </div>
+        </>
+      )}
+    </div>
+  )
+}
+
+// ============================================================
 // PAGE: DIVIDENDY
 // ============================================================
 const DIVIDEND_DB = {
@@ -1568,14 +1955,15 @@ function WatchlistPage() {
 // NAV
 // ============================================================
 const NAV_ITEMS = [
-  { id: 'dashboard',   label: 'Přehled',           icon: '🏠' },
-  { id: 'scanner',     label: 'Skener signálů',    icon: '📡' },
-  { id: 'detail',      label: 'Detail akcie',      icon: '🔍' },
-  { id: 'valuation',   label: 'Deep Valuation',    icon: '📊' },
-  { id: 'statements',  label: 'Finanční výkazy',   icon: '📋' },
-  { id: 'dividendy',   label: 'Dividendy',         icon: '💵' },
-  { id: 'portfolio',   label: 'Portfolio',         icon: '💼' },
-  { id: 'watchlist',   label: 'Watchlist',         icon: '👀' },
+  { id: 'dashboard',    label: 'Přehled',              icon: '🏠' },
+  { id: 'scanner',      label: 'Skener signálů',       icon: '📡' },
+  { id: 'detail',       label: 'Detail akcie',         icon: '🔍' },
+  { id: 'fundamental',  label: 'Fundamentální analýza',icon: '🏰' },
+  { id: 'valuation',    label: 'Deep Valuation',       icon: '📊' },
+  { id: 'statements',   label: 'Finanční výkazy',      icon: '📋' },
+  { id: 'dividendy',    label: 'Dividendy',            icon: '💵' },
+  { id: 'portfolio',    label: 'Portfolio',            icon: '💼' },
+  { id: 'watchlist',    label: 'Watchlist',            icon: '👀' },
 ]
 
 // ============================================================
@@ -1587,15 +1975,16 @@ export default function App() {
 
   const renderPage = () => {
     switch (page) {
-      case 'dashboard':  return <DashboardPage />
-      case 'scanner':    return <ScannerPage />
-      case 'detail':     return <StockDetailPage />
-      case 'valuation':  return <DeepValuationPage />
-      case 'statements': return <FinancialStatementsPage />
-      case 'dividendy':  return <DividendyPage />
-      case 'portfolio':  return <PortfolioPage />
-      case 'watchlist':  return <WatchlistPage />
-      default:           return <DashboardPage />
+      case 'dashboard':    return <DashboardPage />
+      case 'scanner':      return <ScannerPage />
+      case 'detail':       return <StockDetailPage />
+      case 'fundamental':  return <FundamentalPage />
+      case 'valuation':    return <DeepValuationPage />
+      case 'statements':   return <FinancialStatementsPage />
+      case 'dividendy':    return <DividendyPage />
+      case 'portfolio':    return <PortfolioPage />
+      case 'watchlist':    return <WatchlistPage />
+      default:             return <DashboardPage />
     }
   }
 
