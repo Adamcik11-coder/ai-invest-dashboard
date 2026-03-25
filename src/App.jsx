@@ -1958,7 +1958,7 @@ function gemReason(cat, s) {
   const fcf = s.fcf_margin != null ? (s.fcf_margin * 100).toFixed(1) : null
   const rev = s.revenue_growth != null ? (s.revenue_growth * 100).toFixed(1) : null
   const roic = s.roic != null ? (s.roic * 100).toFixed(1) : null
-  const chg = s.change_6m != null ? (s.change_6m * 100).toFixed(1) : null
+  const chg = s.change_6m != null ? parseFloat(s.change_6m).toFixed(1) : null
 
   if (cat === 'UNDERVALUED') {
     const parts = []
