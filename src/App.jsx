@@ -1952,6 +1952,216 @@ function WatchlistPage() {
 }
 
 // ============================================================
+// HIDDEN GEMS
+// ============================================================
+function gemReason(cat, s) {
+  const fcf = s.fcf_margin != null ? (s.fcf_margin * 100).toFixed(1) : null
+  const rev = s.revenue_growth != null ? (s.revenue_growth * 100).toFixed(1) : null
+  const roic = s.roic != null ? (s.roic * 100).toFixed(1) : null
+  const chg = s.change_6m != null ? (s.change_6m * 100).toFixed(1) : null
+
+  if (cat === 'UNDERVALUED') {
+    const parts = []
+    if (fcf) parts.push(`FCF marže ${fcf} %`)
+    if (rev) parts.push(`růst tržeb ${rev} %`)
+    if (roic) parts.push(`ROIC ${roic} %`)
+    const overheat = parseFloat(s.overheat_score)
+    const cold = !isNaN(overheat) && overheat <= 1 ? 'akcie není přehřátá' : null
+    if (cold) parts.push(cold)
+    return `Silná fundamenta (${parts.join(', ')}) s composite score ${s.composite_score} — trh ji pravděpodobně podhodnocuje.`
+  }
+  if (cat === 'MISUNDERSTOOD') {
+    return `Kvalitní firma (quality score ${s.quality_score}) s composite score ${s.composite_score}, ale za posledních 6 měsíců cena klesla o ${Math.abs(chg)} %. Fundamenty zůstávají silné — trh přehlíží kvalitu.`
+  }
+  if (cat === 'VALUE TRAP') {
+    return `Nákupní skóre ${s.buy_score} naznačuje „levnost", ale quality score ${s.quality_score} odhaluje slabé fundamenty. Hrozí hodnotová past — levné může být ještě levnější.`
+  }
+  return ''
+}
+
+function HiddenGemsPage() {
+  const [scan, setScan] = useState(null)
+  const [loading, setLoading] = useState(true)
+  const [err, setErr] = useState(null)
+
+  useEffect(() => {
+    fetch(`${API}/daily-scan`)
+      .then(r => r.json())
+      .then(setScan)
+      .catch(e => setErr(e.message))
+      .finally(() => setLoading(false))
+  }, [])
+
+  if (loading) return <Loading />
+  if (err) return <ErrorMsg msg={err} />
+
+  const stocks = scan?.top ?? []
+
+  const undervalued = stocks.filter(s =>
+    parseFloat(s.composite_score) >= 18 &&
+    parseFloat(s.overheat_score) <= 1 &&
+    parseFloat(s.fcf_margin) > 0.15 &&
+    parseFloat(s.revenue_growth) > 0.08
+  )
+
+  const misunderstood = stocks.filter(s =>
+    parseFloat(s.quality_score) >= 10 &&
+    parseFloat(s.composite_score) >= 18 &&
+    parseFloat(s.change_6m) < 0
+  )
+
+  const valueTrap = stocks.filter(s =>
+    parseFloat(s.buy_score) >= 10 &&
+    parseFloat(s.quality_score) <= 5
+  )
+
+  function GemCard({ s, cat }) {
+    const accent =
+      cat === 'UNDERVALUED' ? { bg: '#ECFDF5', border: '#10B981', badge: '#10B981', badgeBg: '#D1FAE5', label: 'UNDERVALUED' } :
+      cat === 'MISUNDERSTOOD' ? { bg: '#EFF6FF', border: '#2563EB', badge: '#2563EB', badgeBg: '#DBEAFE', label: 'MISUNDERSTOOD' } :
+      { bg: '#FEF2F2', border: '#EF4444', badge: '#EF4444', badgeBg: '#FEE2E2', label: 'VALUE TRAP' }
+
+    return (
+      <div style={{
+        background: accent.bg,
+        border: `1.5px solid ${accent.border}`,
+        borderRadius: 'var(--radius)',
+        padding: '18px 20px',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 10,
+      }}>
+        {/* Header */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+          <span style={{
+            fontWeight: 700, fontSize: 18, color: 'var(--text)',
+            background: 'var(--bg-card)', borderRadius: 6, padding: '2px 10px',
+            border: `1px solid ${accent.border}`,
+          }}>{s.ticker}</span>
+          <span style={{ fontWeight: 600, fontSize: 14, color: 'var(--text)', flex: 1 }}>{s.company}</span>
+          <span style={{
+            fontSize: 11, fontWeight: 700, letterSpacing: 1,
+            background: accent.badgeBg, color: accent.badge,
+            borderRadius: 6, padding: '3px 10px',
+          }}>{accent.label}</span>
+        </div>
+
+        {/* Meta */}
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+          {s.price != null && (
+            <span style={{ fontSize: 13, color: 'var(--text-muted)' }}>
+              <b style={{ color: 'var(--text)' }}>${parseFloat(s.price).toFixed(2)}</b>
+            </span>
+          )}
+          {s.sector && (
+            <span className="sector-tag">{s.sector}</span>
+          )}
+          {s.signal && (
+            <span className="signal-badge" style={{ background: signalColor(s.signal) + '22', color: signalColor(s.signal) }}>
+              {s.signal}
+            </span>
+          )}
+        </div>
+
+        {/* Reason */}
+        <p style={{ fontSize: 13, color: 'var(--text)', lineHeight: 1.55, margin: 0,
+          padding: '8px 12px', background: 'rgba(255,255,255,0.65)', borderRadius: 8 }}>
+          {gemReason(cat, s)}
+        </p>
+
+        {/* Key metrics */}
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 2 }}>
+          {[
+            { label: 'Composite', val: s.composite_score != null ? parseFloat(s.composite_score).toFixed(0) : '—', unit: '' },
+            { label: 'Quality', val: s.quality_score != null ? parseFloat(s.quality_score).toFixed(0) : '—', unit: '' },
+            { label: 'FCF marže', val: s.fcf_margin != null ? (parseFloat(s.fcf_margin)*100).toFixed(1) : '—', unit: '%' },
+            { label: 'ROIC', val: s.roic != null ? (parseFloat(s.roic)*100).toFixed(1) : '—', unit: '%' },
+            { label: 'Růst tržeb', val: s.revenue_growth != null ? (parseFloat(s.revenue_growth)*100).toFixed(1) : '—', unit: '%' },
+          ].map(m => (
+            <div key={m.label} style={{
+              background: 'rgba(255,255,255,0.75)', borderRadius: 8,
+              padding: '6px 12px', textAlign: 'center',
+              border: '1px solid rgba(0,0,0,0.06)',
+              minWidth: 80,
+            }}>
+              <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 2 }}>{m.label}</div>
+              <div style={{ fontSize: 14, fontWeight: 700, color: 'var(--text)' }}>
+                {m.val}{m.val !== '—' ? m.unit : ''}
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    )
+  }
+
+  function Section({ title, icon, desc, items, cat, emptyMsg }) {
+    return (
+      <div className="card" style={{ marginBottom: 28 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 6 }}>
+          <span style={{ fontSize: 22 }}>{icon}</span>
+          <h2 style={{ margin: 0, fontSize: 18, fontWeight: 700, color: 'var(--text)' }}>{title}</h2>
+          <span style={{
+            marginLeft: 4, fontSize: 12, background: 'var(--primary-muted)',
+            color: 'var(--primary)', borderRadius: 20, padding: '2px 10px', fontWeight: 600,
+          }}>{items.length}</span>
+        </div>
+        <p style={{ margin: '0 0 16px', fontSize: 13, color: 'var(--text-muted)', lineHeight: 1.55 }}>{desc}</p>
+        {items.length === 0
+          ? <div style={{ padding: '20px', textAlign: 'center', color: 'var(--text-muted)', fontSize: 13 }}>{emptyMsg}</div>
+          : <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+              {items.map(s => <GemCard key={s.ticker} s={s} cat={cat} />)}
+            </div>
+        }
+      </div>
+    )
+  }
+
+  return (
+    <div className="page">
+      <h1 className="page-title">💎 Hidden Gems</h1>
+      <p style={{ color: 'var(--text-muted)', marginBottom: 28, fontSize: 14 }}>
+        Automatická analýza akcií ze skeneru — hledáme podhodnocené příležitosti, přehlížené kvalitní firmy a hodnotové pasti.
+      </p>
+
+      <div className="kpi-row" style={{ marginBottom: 28 }}>
+        <KpiCard label="Undervalued" value={undervalued.length} color="#10B981" icon="💚" />
+        <KpiCard label="Misunderstood" value={misunderstood.length} color="#2563EB" icon="🔵" />
+        <KpiCard label="Value Trap" value={valueTrap.length} color="#EF4444" icon="🔴" />
+        <KpiCard label="Analyzováno" value={stocks.length} icon="📊" />
+      </div>
+
+      <Section
+        title="Undervalued — pod fair hodnotou"
+        icon="💚"
+        cat="UNDERVALUED"
+        items={undervalued}
+        desc="Akcie s výjimečnými fundamenty (FCF marže > 15 %, růst tržeb > 8 %, composite ≥ 18), které nejsou přehřáté. Trh je pravděpodobně podhodnocuje."
+        emptyMsg="Žádné akcie nesplňují kritéria podhodnocení v aktuálních datech."
+      />
+
+      <Section
+        title="Misunderstood — přehlížená kvalita"
+        icon="🔵"
+        cat="MISUNDERSTOOD"
+        items={misunderstood}
+        desc="Vysoce kvalitní firmy (quality ≥ 10, composite ≥ 18), jejichž cena za posledních 6 měsíců klesla. Fundamenty jsou silné — trh je dočasně přehlíží."
+        emptyMsg="Žádné přehlížené kvalitní akcie v aktuálních datech."
+      />
+
+      <Section
+        title="Value Trap — hodnotová past"
+        icon="🔴"
+        cat="VALUE TRAP"
+        items={valueTrap}
+        desc="Akcie s vysokým buy score (≥ 10) ale slabými fundamenty (quality ≤ 5). Zdánlivě levné, ale fundamentálně rizikové — pozor na hodnotovou past."
+        emptyMsg="Žádné value trapy identifikovány v aktuálních datech."
+      />
+    </div>
+  )
+}
+
+// ============================================================
 // NAV
 // ============================================================
 const NAV_ITEMS = [
@@ -1964,6 +2174,7 @@ const NAV_ITEMS = [
   { id: 'dividendy',    label: 'Dividendy',            icon: '💵' },
   { id: 'portfolio',    label: 'Portfolio',            icon: '💼' },
   { id: 'watchlist',    label: 'Watchlist',            icon: '👀' },
+  { id: 'hidden-gems',  label: 'Hidden Gems',          icon: '💎' },
 ]
 
 // ============================================================
@@ -1984,6 +2195,7 @@ export default function App() {
       case 'dividendy':    return <DividendyPage />
       case 'portfolio':    return <PortfolioPage />
       case 'watchlist':    return <WatchlistPage />
+      case 'hidden-gems':  return <HiddenGemsPage />
       default:             return <DashboardPage />
     }
   }
