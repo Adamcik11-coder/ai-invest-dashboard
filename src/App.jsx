@@ -1827,10 +1827,15 @@ function PortfolioPage() {
   }
 
   const downloadSample = () => {
-    triggerDownload(
-      'ticker,shares,buy_price\nAAPL,10,150.00\nMSFT,5,380.00\nNVDA,3,500.00\nGOOGL,2,170.00',
-      'portfolio_vzor.csv'
-    )
+    const ws = XLSX.utils.aoa_to_sheet([
+      ['ticker', 'shares', 'buy_price'],
+      ['AAPL', 10, 150.00],
+      ['MSFT', 5, 380.00],
+      ['NVDA', 3, 500.00],
+    ])
+    const wb = XLSX.utils.book_new()
+    XLSX.utils.book_append_sheet(wb, ws, 'Portfolio')
+    XLSX.writeFile(wb, 'portfolio_vzor.xlsx')
   }
 
   // ── Render ────────────────────────────────────────────────
