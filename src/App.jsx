@@ -1704,25 +1704,57 @@ function PortfolioPage() {
     finally { setLoading(false) }
   }
 
-  // ── CSV helpers ──────────────────────────────────────────
-  const parseCSVRows = (text) => {
-    const lines = text.trim().split(/\r?\n/)
-    if (lines.length < 2) return null
-    const headers = lines[0].split(',').map(h => h.trim().toLowerCase().replace(/['"]/g, ''))
-    const tickerIdx = headers.findIndex(h => h === 'ticker')
-    const sharesIdx = headers.findIndex(h => h === 'shares')
-    const priceIdx  = headers.findIndex(h => h === 'buy_price' || h === 'buy price')
-    if (tickerIdx === -1 || sharesIdx === -1 || priceIdx === -1) return null
-    return lines.slice(1)
-      .map(line => {
-        const cols = line.split(',').map(c => c.trim().replace(/['"]/g, ''))
+  // ── CSV / XLSX helpers ───────────────────────────────────
+  // Normalize a single row (object with arbitrary-case keys) to lowercase keys
+  const normalizeRow = (row) => {
+    const out = {}
+    for (const k of Object.keys(row)) out[k.trim().toLowerCase().replace(/\s+/g, '_')] = row[k]
+    return out
+  }
+
+  // Find column value case-insensitively; tries aliases
+  const findCol = (row, ...aliases) => {
+    for (const a of aliases) {
+      if (row[a] !== undefined && row[a] !== '') return row[a]
+    }
+    return undefined
+  }
+
+  const rowsFromObjects = (json, fileName) => {
+    if (!json.length) return { rows: null, foundHeaders: [], fileName }
+    const sample = normalizeRow(json[0])
+    const foundHeaders = Object.keys(sample)
+
+    const required = ['ticker', 'shares', 'buy_price']
+    const missing = required.filter(r => !foundHeaders.some(h => h === r || h === r.replace('_', ' ')))
+    if (missing.length) return { rows: null, foundHeaders, missing, fileName }
+
+    const rows = json
+      .map(r => {
+        const n = normalizeRow(r)
         return {
-          ticker: (cols[tickerIdx] || '').toUpperCase(),
-          shares: parseFloat(cols[sharesIdx]) || 0,
-          buy_price: parseFloat(cols[priceIdx]) || 0,
+          ticker: String(findCol(n, 'ticker') ?? '').toUpperCase().trim(),
+          shares: parseFloat(findCol(n, 'shares') ?? 0),
+          buy_price: parseFloat(findCol(n, 'buy_price', 'buy price') ?? 0),
         }
       })
       .filter(r => r.ticker && r.shares > 0 && r.buy_price > 0)
+
+    return { rows: rows.length ? rows : null, foundHeaders, fileName }
+  }
+
+  const parseCSVToObjects = (text) => {
+    const lines = text.trim().split(/\r?\n/).filter(l => l.trim())
+    if (lines.length < 2) return []
+    // Auto-detect delimiter: semicolon or comma
+    const delim = lines[0].includes(';') ? ';' : ','
+    const headers = lines[0].split(delim).map(h => h.trim().replace(/['"]/g, ''))
+    return lines.slice(1).map(line => {
+      const cols = line.split(delim).map(c => c.trim().replace(/['"]/g, ''))
+      const obj = {}
+      headers.forEach((h, i) => { obj[h] = cols[i] ?? '' })
+      return obj
+    })
   }
 
   const triggerDownload = (content, filename, mime = 'text/csv;charset=utf-8;') => {
@@ -1740,36 +1772,30 @@ function PortfolioPage() {
     setImportErr(null)
     const ext = file.name.split('.').pop().toLowerCase()
 
+    const handleResult = ({ rows, foundHeaders, missing, fileName }) => {
+      if (!rows) {
+        const found = foundHeaders.length ? `Nalezené sloupce: ${foundHeaders.join(', ')}` : 'Žádné sloupce nenalezeny'
+        const exp = missing?.length ? `Chybí: ${missing.join(', ')}` : 'Žádné platné řádky po filtraci'
+        setImportErr(`Nepodařilo se načíst data. ${exp}. ${found}. Očekávané sloupce: ticker, shares, buy_price`)
+        return
+      }
+      setImportPreview({ rows, fileName })
+    }
+
     if (ext === 'csv') {
       const reader = new FileReader()
-      reader.onload = ev => {
-        const rows = parseCSVRows(ev.target.result)
-        if (!rows || rows.length === 0) {
-          setImportErr('Nepodařilo se načíst data. Zkontroluj sloupce: ticker, shares, buy_price')
-          return
-        }
-        setImportPreview({ rows, fileName: file.name })
-      }
-      reader.readAsText(file)
+      reader.onload = ev => handleResult(rowsFromObjects(parseCSVToObjects(ev.target.result), file.name))
+      reader.readAsText(file, 'UTF-8')
     } else if (ext === 'xlsx' || ext === 'xls') {
       const reader = new FileReader()
       reader.onload = ev => {
         try {
           const wb = XLSX.read(new Uint8Array(ev.target.result), { type: 'array' })
           const ws = wb.Sheets[wb.SheetNames[0]]
-          const json = XLSX.utils.sheet_to_json(ws, { defval: '' })
-          const rows = json.map(row => ({
-            ticker: String(row.ticker || row.Ticker || '').toUpperCase().trim(),
-            shares: parseFloat(row.shares || row.Shares || 0),
-            buy_price: parseFloat(row.buy_price || row['Buy Price'] || row.buy_Price || 0),
-          })).filter(r => r.ticker && r.shares > 0 && r.buy_price > 0)
-          if (rows.length === 0) {
-            setImportErr('Nepodařilo se načíst data. Zkontroluj sloupce: ticker, shares, buy_price')
-            return
-          }
-          setImportPreview({ rows, fileName: file.name })
-        } catch {
-          setImportErr('Chyba při čtení souboru .xlsx')
+          const json = XLSX.utils.sheet_to_json(ws, { defval: '', raw: false })
+          handleResult(rowsFromObjects(json, file.name))
+        } catch (err) {
+          setImportErr(`Chyba při čtení souboru .xlsx: ${err.message}`)
         }
       }
       reader.readAsArrayBuffer(file)
