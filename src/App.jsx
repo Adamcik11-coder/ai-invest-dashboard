@@ -1832,6 +1832,7 @@ function PortfolioPage() {
       ['AAPL', 10, 150.00],
       ['MSFT', 5, 380.00],
       ['NVDA', 3, 500.00],
+      ['GOOGL', 2, 170.00],
     ])
     const wb = XLSX.utils.book_new()
     XLSX.utils.book_append_sheet(wb, ws, 'Portfolio')
