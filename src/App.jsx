@@ -1,4 +1,5 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
+import * as XLSX from 'xlsx'
 
 const API = 'https://ai-invest-agent-production.up.railway.app'
 
@@ -1644,17 +1645,33 @@ function DividendyPage() {
 const SECTOR_COLORS = ['#2563EB', '#10B981', '#F59E0B', '#EF4444', '#8B5CF6', '#EC4899', '#06B6D4', '#84CC16']
 
 function PortfolioPage() {
-  const [positions, setPositions] = useState([
-    { ticker: 'NVDA', shares: 10, buy_price: 500 },
-    { ticker: 'MSFT', shares: 5,  buy_price: 380 },
-    { ticker: 'ADBE', shares: 3,  buy_price: 400 },
-  ])
+  const STORAGE_KEY = 'ai_invest_portfolio'
+
+  const [positions, setPositions] = useState(() => {
+    try {
+      const saved = localStorage.getItem(STORAGE_KEY)
+      if (saved) return JSON.parse(saved)
+    } catch {}
+    return [
+      { ticker: 'NVDA', shares: 10, buy_price: 500 },
+      { ticker: 'MSFT', shares: 5,  buy_price: 380 },
+      { ticker: 'ADBE', shares: 3,  buy_price: 400 },
+    ]
+  })
   const [newTicker, setNewTicker] = useState('')
   const [newShares, setNewShares] = useState('')
   const [newPrice, setNewPrice] = useState('')
   const [result, setResult] = useState(null)
   const [loading, setLoading] = useState(false)
   const [err, setErr] = useState(null)
+  const [importPreview, setImportPreview] = useState(null)
+  const [importErr, setImportErr] = useState(null)
+  const fileInputRef = useRef(null)
+
+  // Auto-save to localStorage
+  useEffect(() => {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(positions))
+  }, [positions])
 
   const addPosition = () => {
     const t = newTicker.trim().toUpperCase()
@@ -1665,6 +1682,13 @@ function PortfolioPage() {
     setNewTicker(''); setNewShares(''); setNewPrice('')
   }
   const removePosition = i => setPositions(prev => prev.filter((_, idx) => idx !== i))
+
+  const clearPortfolio = () => {
+    if (window.confirm('Opravdu vymazat celé portfolio?')) {
+      setPositions([])
+      setResult(null)
+    }
+  }
 
   const analyze = async () => {
     setLoading(true); setErr(null)
@@ -1680,21 +1704,191 @@ function PortfolioPage() {
     finally { setLoading(false) }
   }
 
+  // ── CSV helpers ──────────────────────────────────────────
+  const parseCSVRows = (text) => {
+    const lines = text.trim().split(/\r?\n/)
+    if (lines.length < 2) return null
+    const headers = lines[0].split(',').map(h => h.trim().toLowerCase().replace(/['"]/g, ''))
+    const tickerIdx = headers.findIndex(h => h === 'ticker')
+    const sharesIdx = headers.findIndex(h => h === 'shares')
+    const priceIdx  = headers.findIndex(h => h === 'buy_price' || h === 'buy price')
+    if (tickerIdx === -1 || sharesIdx === -1 || priceIdx === -1) return null
+    return lines.slice(1)
+      .map(line => {
+        const cols = line.split(',').map(c => c.trim().replace(/['"]/g, ''))
+        return {
+          ticker: (cols[tickerIdx] || '').toUpperCase(),
+          shares: parseFloat(cols[sharesIdx]) || 0,
+          buy_price: parseFloat(cols[priceIdx]) || 0,
+        }
+      })
+      .filter(r => r.ticker && r.shares > 0 && r.buy_price > 0)
+  }
+
+  const triggerDownload = (content, filename, mime = 'text/csv;charset=utf-8;') => {
+    const blob = new Blob([content], { type: mime })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url; a.download = filename; a.click()
+    URL.revokeObjectURL(url)
+  }
+
+  // ── Import ────────────────────────────────────────────────
+  const handleFileChange = (e) => {
+    const file = e.target.files[0]
+    if (!file) return
+    setImportErr(null)
+    const ext = file.name.split('.').pop().toLowerCase()
+
+    if (ext === 'csv') {
+      const reader = new FileReader()
+      reader.onload = ev => {
+        const rows = parseCSVRows(ev.target.result)
+        if (!rows || rows.length === 0) {
+          setImportErr('Nepodařilo se načíst data. Zkontroluj sloupce: ticker, shares, buy_price')
+          return
+        }
+        setImportPreview({ rows, fileName: file.name })
+      }
+      reader.readAsText(file)
+    } else if (ext === 'xlsx' || ext === 'xls') {
+      const reader = new FileReader()
+      reader.onload = ev => {
+        try {
+          const wb = XLSX.read(new Uint8Array(ev.target.result), { type: 'array' })
+          const ws = wb.Sheets[wb.SheetNames[0]]
+          const json = XLSX.utils.sheet_to_json(ws, { defval: '' })
+          const rows = json.map(row => ({
+            ticker: String(row.ticker || row.Ticker || '').toUpperCase().trim(),
+            shares: parseFloat(row.shares || row.Shares || 0),
+            buy_price: parseFloat(row.buy_price || row['Buy Price'] || row.buy_Price || 0),
+          })).filter(r => r.ticker && r.shares > 0 && r.buy_price > 0)
+          if (rows.length === 0) {
+            setImportErr('Nepodařilo se načíst data. Zkontroluj sloupce: ticker, shares, buy_price')
+            return
+          }
+          setImportPreview({ rows, fileName: file.name })
+        } catch {
+          setImportErr('Chyba při čtení souboru .xlsx')
+        }
+      }
+      reader.readAsArrayBuffer(file)
+    } else {
+      setImportErr('Nepodporovaný formát. Použij .csv nebo .xlsx')
+    }
+    e.target.value = ''
+  }
+
+  const confirmImport = () => {
+    setPositions(importPreview.rows)
+    setImportPreview(null)
+    setResult(null)
+  }
+
+  // ── Export ────────────────────────────────────────────────
+  const exportCSV = () => {
+    if (result) {
+      const header = 'ticker,shares,buy_price,current_price,profit_loss,profit_loss_pct'
+      const rows = result.positions.map(p =>
+        `${p.ticker},${p.shares},${fmt(p.buy_price)},${fmt(p.current_price)},${fmt(p.profit_loss)},${fmt(p.profit_loss_pct, 2)}`
+      )
+      triggerDownload([header, ...rows].join('\n'), 'portfolio_pnl.csv')
+    } else {
+      const header = 'ticker,shares,buy_price'
+      const rows = positions.map(p => `${p.ticker},${p.shares},${p.buy_price}`)
+      triggerDownload([header, ...rows].join('\n'), 'portfolio.csv')
+    }
+  }
+
+  const downloadSample = () => {
+    triggerDownload(
+      'ticker,shares,buy_price\nAAPL,10,150.00\nMSFT,5,380.00\nNVDA,3,500.00\nGOOGL,2,170.00',
+      'portfolio_vzor.csv'
+    )
+  }
+
+  // ── Render ────────────────────────────────────────────────
   return (
     <div className="page">
       <h1 className="page-title">Portfolio tracker</h1>
 
+      {/* Import preview modal */}
+      {importPreview && (
+        <div className="popup-overlay" onClick={() => setImportPreview(null)}>
+          <div className="popup-card" style={{ maxWidth: 560, width: '100%' }} onClick={e => e.stopPropagation()}>
+            <button className="popup-close" onClick={() => setImportPreview(null)}>×</button>
+            <h3 className="popup-title">Náhled importu — {importPreview.fileName}</h3>
+            <p style={{ fontSize: 13, color: 'var(--text-muted)', margin: '0 0 12px' }}>
+              Nalezeno {importPreview.rows.length} pozic. Importem přepíšeš aktuální portfolio.
+            </p>
+            <div className="table-wrap" style={{ maxHeight: 260, overflowY: 'auto' }}>
+              <table className="data-table">
+                <thead>
+                  <tr><th>Ticker</th><th>Počet akcií</th><th>Nák. cena ($)</th></tr>
+                </thead>
+                <tbody>
+                  {importPreview.rows.map((r, i) => (
+                    <tr key={i}>
+                      <td><span className="ticker-badge">{r.ticker}</span></td>
+                      <td className="num">{r.shares}</td>
+                      <td className="num">${r.buy_price}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <div style={{ display: 'flex', gap: 10, marginTop: 16, justifyContent: 'flex-end' }}>
+              <button className="btn-secondary" onClick={() => setImportPreview(null)}>Zrušit</button>
+              <button className="btn-primary" onClick={confirmImport}>✅ Potvrdit import</button>
+            </div>
+          </div>
+        </div>
+      )}
+
       <div className="card mb-20">
-        <h3 className="card-title">Přidat pozici</h3>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 10, marginBottom: 16 }}>
+          <h3 className="card-title" style={{ margin: 0 }}>Přidat pozici</h3>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            <input
+              type="file"
+              accept=".csv,.xlsx,.xls"
+              ref={fileInputRef}
+              style={{ display: 'none' }}
+              onChange={handleFileChange}
+            />
+            <button className="btn-secondary" onClick={() => fileInputRef.current?.click()}>
+              📂 Importovat
+            </button>
+            <button className="btn-secondary" onClick={exportCSV}>
+              💾 Exportovat CSV
+            </button>
+            <button className="btn-secondary" onClick={downloadSample}>
+              📄 Stáhnout vzor
+            </button>
+            {positions.length > 0 && (
+              <button className="btn-secondary" style={{ color: '#EF4444', borderColor: '#EF4444' }} onClick={clearPortfolio}>
+                🗑 Vymazat
+              </button>
+            )}
+          </div>
+        </div>
+
+        {importErr && (
+          <div className="warning-box" style={{ marginBottom: 12 }}>⚠ {importErr}</div>
+        )}
+
         <div className="add-position-row">
           <input className="search-input" style={{ flex: 2 }} placeholder="Ticker (NVDA, AAPL…)"
-            value={newTicker} onChange={e => setNewTicker(e.target.value)} />
+            value={newTicker} onChange={e => setNewTicker(e.target.value)}
+            onKeyDown={e => e.key === 'Enter' && addPosition()} />
           <input className="search-input" style={{ flex: 1 }} placeholder="Počet akcií" type="number"
             value={newShares} onChange={e => setNewShares(e.target.value)} />
-          <input className="search-input" style={{ flex: 1 }} placeholder="Nákupní cena ($)" type="number"
-            value={newPrice} onChange={e => setNewPrice(e.target.value)} />
+          <input className="search-input" style={{ flex: 1 }} placeholder="Nák. cena ($)" type="number"
+            value={newPrice} onChange={e => setNewPrice(e.target.value)}
+            onKeyDown={e => e.key === 'Enter' && addPosition()} />
           <button className="btn-primary" onClick={addPosition}>Přidat</button>
         </div>
+
         <div className="portfolio-input-list">
           {positions.map((p, i) => (
             <div key={i} className="portfolio-input-item">
@@ -1704,9 +1898,17 @@ function PortfolioPage() {
             </div>
           ))}
         </div>
-        <button className="btn-primary" style={{ marginTop: 12 }} onClick={analyze} disabled={loading}>
-          {loading ? 'Analyzuji…' : '📊 Analyzovat portfolio'}
-        </button>
+
+        {positions.length > 0 && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 12 }}>
+            <button className="btn-primary" onClick={analyze} disabled={loading}>
+              {loading ? 'Analyzuji…' : '📊 Analyzovat portfolio'}
+            </button>
+            <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+              💾 Portfolio se automaticky ukládá
+            </span>
+          </div>
+        )}
       </div>
 
       {err && <ErrorMsg msg={err} />}
@@ -1733,7 +1935,10 @@ function PortfolioPage() {
           </div>
 
           <div className="card">
-            <h3 className="card-title">Pozice v portfoliu</h3>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
+              <h3 className="card-title" style={{ margin: 0 }}>Pozice v portfoliu</h3>
+              <button className="btn-secondary" onClick={exportCSV}>💾 Exportovat s P&amp;L</button>
+            </div>
             <div className="table-wrap">
               <table className="data-table">
                 <thead>
